@@ -257,6 +257,20 @@ def import_csv_files(database_path, files, progress_callback=None):
     return imported_rows, skipped_rows
 
 
+def _calculate_rsi14(closes):
+    if len(closes) < 15:
+        return None
+    changes = [
+        current - previous
+        for previous, current in zip(closes[-15:-1], closes[-14:])
+    ]
+    average_gain = math.fsum(max(change, 0) for change in changes) / 14
+    average_loss = math.fsum(max(-change, 0) for change in changes) / 14
+    if average_loss == 0:
+        return 100.0 if average_gain else 50.0
+    return 100 - 100 / (1 + average_gain / average_loss)
+
+
 def _calculate_indicators(
     closes,
     ma_short_period=20,
@@ -277,16 +291,7 @@ def _calculate_indicators(
     previous_ma_short = math.fsum(previous_closes[-ma_short_period:]) / ma_short_period
     previous_ma_long = math.fsum(previous_closes) / ma_long_period
 
-    changes = [
-        current - previous
-        for previous, current in zip(closes[-15:-1], closes[-14:])
-    ]
-    average_gain = math.fsum(max(change, 0) for change in changes) / 14
-    average_loss = math.fsum(max(-change, 0) for change in changes) / 14
-    if average_loss == 0:
-        rsi14 = 100.0 if average_gain else 50.0
-    else:
-        rsi14 = 100 - 100 / (1 + average_gain / average_loss)
+    rsi14 = _calculate_rsi14(closes)
 
     crossed_up = previous_ma_short <= previous_ma_long and ma_short > ma_long
     crossed_down = previous_ma_short >= previous_ma_long and ma_short < ma_long
@@ -297,6 +302,54 @@ def _calculate_indicators(
     else:
         signal = "HOLD"
     return signal, ma_short, ma_long, rsi14
+
+
+def get_rsi14(database_path, ticker, current_price, as_of_date):
+    initialize_database(database_path)
+    ticker = str(ticker).strip().upper()
+    trade_date = (
+        as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)
+    )
+    with _database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT close FROM daily_prices
+            WHERE ticker = ? AND trade_date < ?
+            ORDER BY trade_date DESC LIMIT 14
+            """,
+            (ticker, trade_date),
+        ).fetchall()
+    if len(rows) < 14:
+        return None
+    closes = [float(row[0]) for row in reversed(rows)] + [float(current_price)]
+    return _calculate_rsi14(closes)
+
+
+def get_moving_averages(database_path, ticker, current_price, as_of_date, periods):
+    initialize_database(database_path)
+    ticker = str(ticker).strip().upper()
+    periods = tuple(dict.fromkeys(periods))
+    if any(period < 1 for period in periods):
+        raise ValueError("Moving average periods must be positive.")
+    if not periods:
+        return {}
+    trade_date = (
+        as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)
+    )
+    with _database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT close FROM daily_prices
+            WHERE ticker = ? AND trade_date < ?
+            ORDER BY trade_date DESC LIMIT ?
+            """,
+            (ticker, trade_date, max(periods) - 1),
+        ).fetchall()
+    closes = [float(row[0]) for row in reversed(rows)] + [float(current_price)]
+    return {
+        period: math.fsum(closes[-period:]) / period if len(closes) >= period else None
+        for period in periods
+    }
 
 
 def calculate_intraday_signals(

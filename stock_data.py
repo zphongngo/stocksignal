@@ -41,6 +41,7 @@ def fetch_price_board(tickers):
         volume = match.get("accumulatedVolume") or 0
         quotes[info["symbol"]] = {
             "price": price / 1000,
+            "change": (price - ref) / 1000,
             "pct": round((price - ref) / ref * 100, 2),
             "vol": volume / 1_000,
             "volume": volume,

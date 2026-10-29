@@ -41,7 +41,7 @@ if __name__ == "__main__":
     if not runtime.exists():
         from streamlit.web import cli as stcli
         parser = argparse.ArgumentParser()
-        parser.add_argument("--port", "-port", type=int, default=8501)
+        parser.add_argument("--port", "-port", type=int, default=8989)
         args = parser.parse_args()
         sys.argv = ["streamlit", "run", "--server.port", str(args.port), __file__]
         sys.exit(stcli.main())
@@ -533,6 +533,14 @@ def volume_relative_to_average(ticker, quotes, average_volumes):
     return volume, f"{volume / average_volume * 100:.0f}%"
 
 
+def volume_change_from_average(ticker, quotes, average_volumes):
+    volume, _ = volume_relative_to_average(ticker, quotes, average_volumes)
+    average_volume = average_volumes.get(ticker)
+    if average_volume is None or average_volume <= 0:
+        return "N/A"
+    return f"{(volume / average_volume - 1) * 100:+.0f}%"
+
+
 def format_ticker_alert_sections(
     strong_tickers,
     weak_tickers,
@@ -548,13 +556,19 @@ def format_ticker_alert_sections(
         )
         return (
             f"{ticker:<7} {quote['price']:>8.2f} {quote['pct']:>+7.2f}% "
-            f"{volume:>12,.0f} {relative_volume:>8}"
+            f"{volume / 1000:>12,.1f} {relative_volume:>8}"
         )
 
+    strong_tickers = sorted(
+        strong_tickers, key=lambda ticker: quotes[ticker]["pct"], reverse=True
+    )
+    weak_tickers = sorted(
+        weak_tickers, key=lambda ticker: quotes[ticker]["pct"], reverse=True
+    )
     strong_rows = "\n".join(format_row(ticker) for ticker in strong_tickers) or "None"
     weak_rows = "\n".join(format_row(ticker) for ticker in weak_tickers) or "None"
     header = (
-        f"{'Ma CK':<7} {'Gia':>8} {'Thay doi':>8} {'KLGD':>12} "
+        f"{'Ma CK':<7} {'Gia':>8} {'Thay doi':>8} {'KLGD (nghin)':>12} "
         f"{'Vol/TB ' + str(lookback_sessions) + 'p':>8}"
     )
     return (
@@ -681,6 +695,12 @@ def send_scheduled_signal_alerts(store, quotes, now):
     if not signals:
         return
 
+    average_volumes = get_average_volumes(
+        STOCK_HISTORY_DATABASE,
+        [item["ticker"] for item in signals],
+        now.date(),
+        10,
+    )
     visible_signals = signals[:50]
     message = (
         f"StockBoard BUY/SELL signals ({now:%Y-%m-%d %H:%M})\n"
@@ -689,7 +709,9 @@ def send_scheduled_signal_alerts(store, quotes, now):
             f"{item['ticker']} {item['signal']} | Price {item['price']:.2f} | "
             f"MA{item['ma_short_period']} {item['ma20']:.2f} | "
             f"MA{item['ma_long_period']} {item['ma50']:.2f} | "
-            f"RSI14 {item['rsi14']:.1f}"
+            f"RSI14 {item['rsi14']:.1f} | "
+            f"Vol vs TB10 "
+            f"{volume_change_from_average(item['ticker'], quotes, average_volumes)}"
             for item in visible_signals
         )
     )

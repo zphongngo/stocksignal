@@ -42,7 +42,7 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="stock")
     commands = parser.add_subparsers(dest="command", required=True)
     start_parser = commands.add_parser("start", help="start the StockBoard server")
-    start_parser.add_argument("--port", "-port", "-p", type=valid_port, default=8501)
+    start_parser.add_argument("--port", "-port", "-p", type=valid_port, default=8989)
     commands.add_parser("stop", help="stop the StockBoard server")
     commands.add_parser("status", help="show the StockBoard server status")
     return parser
@@ -230,7 +230,7 @@ def show_status():
     app_pids = find_processes(APP_FILE)
     bot_pids = find_processes(BOT_FILE)
     if app_pids:
-        port = state.get("port", 8501)
+        port = state.get("port", 8989)
         print(f"StockBoard app: running (PID {app_pids[0]}), port {port}.")
         print(f"URL: http://127.0.0.1:{port}")
     else:

@@ -27,4 +27,4 @@ stock status
 stock stop
 ```
 
-The default port is 8501. `stock start` starts the Streamlit app and, when `TELEGRAM_BOT_TOKEN` is configured, the Telegram bot. `stock stop` stops both, and `stock status` reports them separately. Open the URL printed by `start` or `status` on the Linux Mint PC. Runtime output is written to `stockboard.log` and `telegram_bot.log` in the project folder. The older `stockboard` command remains available as an alias. Keep the project folder in place while services are running; its database and settings are stored there.
+The default port is 8989. `stock start` starts the Streamlit app and, when `TELEGRAM_BOT_TOKEN` is configured, the Telegram bot. `stock stop` stops both, and `stock status` reports them separately. Open the URL printed by `start` or `status` on the Linux Mint PC. Runtime output is written to `stockboard.log` and `telegram_bot.log` in the project folder. The older `stockboard` command remains available as an alias. Keep the project folder in place while services are running; its database and settings are stored there.

@@ -3,8 +3,10 @@ import asyncio
 import os
 import logging
 import re
+import sys
 import threading
 import time
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -19,11 +21,17 @@ from telegram.ext import (
 )
 from telegram_inbox import record_message
 from stock_data import fetch_price_board
+from stock_history import get_average_volumes, get_moving_averages, get_rsi14
 
 load_dotenv(dotenv_path=Path(__file__).with_name("Phong_telegram.env"))
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DATA_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+)
 STATUS_FILE = Path(__file__).with_name(".telegram_bot_status")
 STOP_REQUEST_FILE = Path(__file__).with_name(".telegram_bot_stop")
 INBOX_DATABASE = Path(__file__).with_name("telegram_inbox.db")
@@ -150,12 +158,33 @@ async def check_ticker(
         await reply_to_user(update, f"Ticker {ticker} was not found on Vietcap's price board.")
         return
 
+    history_database = DATA_DIR / "data" / "stock_history.sqlite3"
+    as_of_date = date.today()
+    average_volumes = get_average_volumes(history_database, [ticker], as_of_date, 10)
+    average_volume = average_volumes.get(ticker)
+    rsi14 = get_rsi14(history_database, ticker, quote["price"], as_of_date)
+    moving_averages = get_moving_averages(
+        history_database,
+        ticker,
+        quote["price"],
+        as_of_date,
+        (5, 8, 21, 55, 129),
+    )
+    average_volume_text = f"{average_volume:,.0f}" if average_volume is not None else "N/A"
+    rsi14_text = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
+    moving_average_text = "\n".join(
+        f"MA{period}: {value:.2f}" if value is not None else f"MA{period}: N/A"
+        for period, value in moving_averages.items()
+    )
     await reply_to_user(
         update,
         f"Ma CK: {ticker}\n"
         f"Gia: {quote['price']:.2f}\n"
-        f"Thay Doi: {quote['pct']:+.2f}%\n"
-        f"Khoi Luong : {quote['volume']:,.0f}",
+        f"Thay Doi: {quote['change']:+.2f} | % {quote['pct']:+.2f}%\n"
+        f"Khoi Luong: {quote['volume']:,.0f}\n"
+        f"Khoi Luong TB 10 Phien: {average_volume_text}\n"
+        f"RSI14: {rsi14_text}\n"
+        f"{moving_average_text}",
     )
 
 
