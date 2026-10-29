@@ -1,0 +1,10 @@
+streamlit
+numpy
+requests
+truststore
+openpyxl
+pandas
+websockets
+pyinstaller
+python-dotenv
+python-telegram-bot

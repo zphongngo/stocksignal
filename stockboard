@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+APP_DIR=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+if [ -x "$APP_DIR/.venv/bin/python" ]; then
+    PYTHON="$APP_DIR/.venv/bin/python"
+else
+    PYTHON="$APP_DIR/.venv-linux/bin/python"
+fi
+
+if [ ! -x "$PYTHON" ]; then
+    printf '%s\n' "StockBoard is not installed yet. Run: bash \"$APP_DIR/install_linux.sh\"" >&2
+    exit 1
+fi
+
+exec "$PYTHON" "$APP_DIR/stockboard_cli.py" "$@"

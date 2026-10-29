@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+data/
+build/
+dist/
+*.spec.bak
+*.env
+Phong_ChatID.txt
+telegram_alerts.json
+telegram_bot.log
+telegram_inbox.db
+.stockboard/
+stockboard.log
+.telegram_bot_status
+.telegram_bot_stop
