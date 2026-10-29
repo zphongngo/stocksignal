@@ -16,7 +16,7 @@ import subprocess
 import threading
 import time
 import truststore
-from datetime import datetime
+from datetime import datetime, time as datetime_time
 from dotenv import load_dotenv
 from telegram_inbox import list_conversations, list_messages, record_message
 from stock_data import fetch_price_board
@@ -24,8 +24,10 @@ from stock_history import (
     calculate_intraday_signals,
     get_average_volumes,
     get_history_summary,
+    get_latest_daily_quotes,
     get_latest_signal_snapshot,
     get_recent_signals,
+    has_final_daily_close,
     import_csv_files,
     record_daily_close,
 )
@@ -63,7 +65,19 @@ PRICE_UPDATE_TIMES = (
 PRICE_UPDATE_SCHEDULE_TEXT = ", ".join(
     f"{hour:02d}:{minute:02d}" for hour, minute in PRICE_UPDATE_TIMES
 )
+BOARD_RESUME_TIME = datetime_time(8, 45)
+BOARD_FREEZE_TIME = datetime_time(15, 30)
 STOCK_DETAIL_URL = "https://24hmoney.vn/stock/{ticker}"  # Trang mo khi bam vao 1 ma
+
+
+def is_board_frozen(now):
+    if now.weekday() >= 5:
+        return True
+    return now.time() < BOARD_RESUME_TIME or now.time() >= BOARD_FREEZE_TIME
+
+
+def is_after_close(now):
+    return now.weekday() < 5 and now.time() >= BOARD_FREEZE_TIME
 
 # 1. Cau hinh trang Streamlit
 st.set_page_config(
@@ -387,7 +401,8 @@ class LiveQuoteStore:
         self.wake = threading.Event()
         self.ready = threading.Event()  # duoc bat sau lan lay du lieu dau tien
         self.tickers = list(ALL_TICKERS)  # danh sach ma can lay, cap nhat khi sua SECTOR_MAP
-        self.quotes = {}          # ticker -> dict gia
+        self.quotes = get_latest_daily_quotes(STOCK_HISTORY_DATABASE)
+        # Khi app mo ngoai gio giao dich, hien thi gia dong cua SQLite gan nhat.
         self.last_update = None   # thoi diem lay du lieu thanh cong gan nhat
         self.session = None       # trang thai phien giao dich
         self.error = None         # loi gan nhat (None neu dang ket noi tot)
@@ -895,32 +910,71 @@ def poll_forever(store):
     while True:
         started = time.monotonic()
         try:
-            quotes, session = fetch_price_board(store.tickers)
             now = datetime.now()
-            _, ma_short_period, ma_long_period, rsi_level1, rsi_level2 = (
-                store.signal_settings()
-            )
-            try:
-                record_daily_close(
-                    STOCK_HISTORY_DATABASE,
-                    quotes,
-                    now,
-                    session,
-                    ma_short_period,
-                    ma_long_period,
-                    rsi_level1,
-                    rsi_level2,
+            if is_board_frozen(now):
+                # After the close, keep polling only until the final daily snapshot
+                # reaches SQLite. Before open and on weekends, do not call the API.
+                if is_after_close(now) and not has_final_daily_close(
+                    STOCK_HISTORY_DATABASE, now.date()
+                ):
+                    quotes, session = fetch_price_board(store.tickers)
+                    now = datetime.now()
+                    _, ma_short_period, ma_long_period, rsi_level1, rsi_level2 = (
+                        store.signal_settings()
+                    )
+                    captured, _ = record_daily_close(
+                        STOCK_HISTORY_DATABASE,
+                        quotes,
+                        now,
+                        session,
+                        ma_short_period,
+                        ma_long_period,
+                        rsi_level1,
+                        rsi_level2,
+                    )
+                    if captured or has_final_daily_close(
+                        STOCK_HISTORY_DATABASE, now.date()
+                    ):
+                        with store.lock:
+                            store.quotes = quotes
+                            store.session = session
+                            store.last_update = now
+                            store.error = None
+                    elif not store.quotes:
+                        with store.lock:
+                            store.quotes = quotes
+                            store.session = session
+                            store.last_update = now
+                            store.error = None
+                # During the closed period the UI quote store is deliberately
+                # unchanged; the next weekday API refresh starts at 08:45.
+            else:
+                quotes, session = fetch_price_board(store.tickers)
+                now = datetime.now()
+                _, ma_short_period, ma_long_period, rsi_level1, rsi_level2 = (
+                    store.signal_settings()
                 )
-            except Exception:
-                logging.exception("Could not capture daily stock history")
-            send_threshold_alerts(store, quotes, now)
-            send_periodic_price_updates(store, quotes, now)
-            send_scheduled_signal_alerts(store, quotes, now)
-            with store.lock:
-                store.quotes = quotes
-                store.session = session
-                store.last_update = datetime.now()
-                store.error = None
+                try:
+                    record_daily_close(
+                        STOCK_HISTORY_DATABASE,
+                        quotes,
+                        now,
+                        session,
+                        ma_short_period,
+                        ma_long_period,
+                        rsi_level1,
+                        rsi_level2,
+                    )
+                except Exception:
+                    logging.exception("Could not capture daily stock history")
+                send_threshold_alerts(store, quotes, now)
+                send_periodic_price_updates(store, quotes, now)
+                send_scheduled_signal_alerts(store, quotes, now)
+                with store.lock:
+                    store.quotes = quotes
+                    store.session = session
+                    store.last_update = now
+                    store.error = None
         except Exception as e:
             with store.lock:
                 store.error = str(e)
@@ -1536,12 +1590,17 @@ if "mg_flash" in st.session_state:
 @st.fragment(run_every=POLL_SECONDS)
 def render_board():
     quotes, last_update, session, error = store.snapshot()
+    now = datetime.now()
+    board_frozen = is_board_frozen(now)
+    updated = last_update or now
 
     if quotes:
-        source = f"🟢 Realtime (Vietcap) · {SESSION_LABELS.get(session, session or 'N/A')}"
-        if error:
-            source = f"🟡 Mat ket noi, dang thu lai - hien thi du lieu luc {last_update:%H:%M:%S}"
-        updated = last_update
+        if board_frozen:
+            source = "🔒 Giá chốt phiên / dữ liệu SQLite · dừng cập nhật đến 08:45 ngày làm việc tiếp theo"
+        else:
+            source = f"🟢 Realtime (Vietcap) · {SESSION_LABELS.get(session, session or 'N/A')}"
+        if error and not board_frozen:
+            source = f"🟡 Mat ket noi, dang thu lai - hien thi du lieu luc {updated:%H:%M:%S}"
     else:
         quotes = get_simulated_data()
         source = "🔴 Chua ket noi duoc nguon realtime - dang dung du lieu gia lap"
@@ -1549,7 +1608,8 @@ def render_board():
             source += f" ({error[:80]})"
         updated = datetime.now()
 
-    st.caption(f"Cap nhat luc: {updated:%H:%M:%S} | Nguon: {source} | Tu lam moi moi {POLL_SECONDS}s"
+    update_label = "Hien thi luc" if board_frozen else "Cap nhat luc"
+    st.caption(f"{update_label}: {updated:%H:%M:%S} | Nguon: {source} | Tu lam moi moi {POLL_SECONDS}s"
                f" | Gia: nghin dong · KL: nghin co phieu | Telegram bot: {get_telegram_bot_status()}")
 
     if not SECTOR_MAP:

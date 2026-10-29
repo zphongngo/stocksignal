@@ -19,6 +19,7 @@ CSV_COLUMNS = {
 }
 IMPORT_BATCH_SIZE = 5000
 DATABASE_TIMEOUT_SECONDS = 60
+DAILY_CLOSE_TIME = time(15, 30)
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DATABASES = set()
 
@@ -373,7 +374,7 @@ def record_daily_close(
 ):
     if (
         captured_at.weekday() >= 5
-        or captured_at.time() < time(15, 0)
+        or captured_at.time() < DAILY_CLOSE_TIME
         or session != "ENDED"
         or not quotes
     ):
@@ -385,12 +386,15 @@ def record_daily_close(
     connection = sqlite3.connect(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        already_captured = connection.execute(
-            "SELECT 1 FROM daily_captures WHERE trade_date = ?", (trade_date,)
+        previous_capture = connection.execute(
+            "SELECT captured_at FROM daily_captures WHERE trade_date = ?",
+            (trade_date,),
         ).fetchone()
-        if already_captured:
-            connection.rollback()
-            return False, []
+        if previous_capture:
+            previous_captured_at = datetime.fromisoformat(previous_capture[0])
+            if previous_captured_at.time() >= DAILY_CLOSE_TIME:
+                connection.rollback()
+                return False, []
 
         valid_quotes = []
         for ticker, quote in quotes.items():
@@ -481,6 +485,9 @@ def record_daily_close(
             """
             INSERT INTO daily_captures (trade_date, captured_at, quote_count)
             VALUES (?, ?, ?)
+            ON CONFLICT (trade_date) DO UPDATE SET
+                captured_at = excluded.captured_at,
+                quote_count = excluded.quote_count
             """,
             (trade_date, captured_at.isoformat(timespec="seconds"), len(valid_quotes)),
         )
@@ -500,6 +507,67 @@ def get_history_summary(database_path):
             "SELECT COUNT(*), MAX(trade_date) FROM daily_prices"
         ).fetchone()
         return row_count, latest_date
+
+
+def has_final_daily_close(database_path, trade_date):
+    initialize_database(database_path)
+    trade_date = (
+        trade_date.isoformat() if hasattr(trade_date, "isoformat") else str(trade_date)
+    )
+    with _database_connection(database_path) as connection:
+        row = connection.execute(
+            "SELECT captured_at FROM daily_captures WHERE trade_date = ?",
+            (trade_date,),
+        ).fetchone()
+    if not row:
+        return False
+    return datetime.fromisoformat(row[0]).time() >= DAILY_CLOSE_TIME
+
+
+def get_latest_daily_quotes(database_path):
+    """Return the latest stored close per ticker in the live-board quote shape."""
+    initialize_database(database_path)
+    with _database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT latest.ticker, latest.close, latest.volume, previous.close
+            FROM daily_prices AS latest
+            JOIN (
+                SELECT ticker, MAX(trade_date) AS trade_date
+                FROM daily_prices
+                GROUP BY ticker
+            ) AS latest_date
+              ON latest.ticker = latest_date.ticker
+             AND latest.trade_date = latest_date.trade_date
+            LEFT JOIN daily_prices AS previous
+              ON previous.ticker = latest.ticker
+             AND previous.trade_date = (
+                 SELECT MAX(prior.trade_date)
+                 FROM daily_prices AS prior
+                 WHERE prior.ticker = latest.ticker
+                   AND prior.trade_date < latest.trade_date
+             )
+            """
+        ).fetchall()
+
+    quotes = {}
+    for ticker, close, volume, previous_close in rows:
+        close = float(close)
+        if not math.isfinite(close) or close <= 0:
+            continue
+        pct = (
+            round((close - previous_close) / previous_close * 100, 2)
+            if previous_close is not None and previous_close > 0
+            else 0.0
+        )
+        quotes[ticker] = {
+            "price": close,
+            "pct": pct,
+            "vol": (volume or 0) / 1000,
+            "volume": volume or 0,
+            "cls": "up" if pct > 0 else "down" if pct < 0 else "ref",
+        }
+    return quotes
 
 
 def get_average_volumes(database_path, tickers, as_of_date, lookback_sessions):
