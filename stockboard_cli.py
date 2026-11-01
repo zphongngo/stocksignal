@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import getpass
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,8 @@ STATE_FILE = STATE_DIR / "server.json"
 LOCK_FILE = STATE_DIR / "server.lock"
 LOG_FILE = APP_DIR / "stockboard.log"
 BOT_LOG_FILE = APP_DIR / "telegram_bot.log"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+AUTOSTART_UNIT = SYSTEMD_USER_DIR / "stockboard.service"
 
 load_dotenv(BOT_ENV_FILE)
 
@@ -45,7 +48,108 @@ def build_parser():
     start_parser.add_argument("--port", "-port", "-p", type=valid_port, default=8989)
     commands.add_parser("stop", help="stop the StockBoard server")
     commands.add_parser("status", help="show the StockBoard server status")
+    autostart_parser = commands.add_parser("autostart", help="manage startup at system boot")
+    autostart_commands = autostart_parser.add_subparsers(dest="autostart_command", required=True)
+    enable_parser = autostart_commands.add_parser("enable", help="start StockBoard automatically at boot")
+    enable_parser.add_argument("--port", "-p", type=valid_port, default=8989)
+    autostart_commands.add_parser("disable", help="disable automatic startup")
+    autostart_commands.add_parser("status", help="show automatic startup status")
     return parser
+
+
+def systemd_quote(value):
+    escaped = value.replace("%", "%%").replace("$", "$$").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def systemctl(*arguments):
+    try:
+        return subprocess.run(["systemctl", "--user", *arguments], check=False).returncode
+    except OSError as exc:
+        print(f"Could not run systemctl: {exc}", file=sys.stderr)
+        return 1
+
+
+def enable_autostart(port):
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    python = systemd_quote(sys.executable)
+    cli = systemd_quote(str(Path(__file__).resolve()))
+    unit = "\n".join(
+        [
+            "[Unit]",
+            "Description=StockBoard server",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "RemainAfterExit=yes",
+            f"WorkingDirectory={systemd_quote(str(APP_DIR))}",
+            f"ExecStart={python} {cli} start --port {port}",
+            f"ExecStop={python} {cli} stop",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+    AUTOSTART_UNIT.write_text(unit, encoding="utf-8")
+
+    try:
+        linger = subprocess.run(
+            ["loginctl", "enable-linger", getpass.getuser()],
+            check=False,
+        )
+    except OSError as exc:
+        print(f"Could not enable startup at boot: {exc}", file=sys.stderr)
+        return 1
+    if linger.returncode:
+        print(
+            f"Could not enable user lingering. Run: sudo loginctl enable-linger {getpass.getuser()}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if systemctl("daemon-reload") or systemctl("enable", "--now", "stockboard.service"):
+        print("Could not enable the StockBoard systemd service.", file=sys.stderr)
+        return 1
+    print(f"StockBoard will start at boot on port {port}.")
+    return 0
+
+
+def disable_autostart():
+    result = systemctl("disable", "--now", "stockboard.service")
+    if result:
+        print("Could not disable the StockBoard systemd service.", file=sys.stderr)
+        return result
+    AUTOSTART_UNIT.unlink(missing_ok=True)
+    if systemctl("daemon-reload"):
+        print("Could not reload the systemd user manager.", file=sys.stderr)
+        return 1
+    print("StockBoard automatic startup is disabled.")
+    return 0
+
+
+def show_autostart_status():
+    if not AUTOSTART_UNIT.exists():
+        print("StockBoard automatic startup is not configured.")
+        return 0
+
+    enabled = subprocess.run(
+        ["systemctl", "--user", "is-enabled", "stockboard.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    active = subprocess.run(
+        ["systemctl", "--user", "is-active", "stockboard.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    print(f"Startup: {(enabled.stdout or enabled.stderr).strip()}")
+    print(f"Service: {(active.stdout or active.stderr).strip()}")
+    return 0
 
 
 def read_state():
@@ -254,6 +358,12 @@ def main():
         return start_server(args.port)
     if args.command == "stop":
         return stop_server()
+    if args.command == "autostart":
+        if args.autostart_command == "enable":
+            return enable_autostart(args.port)
+        if args.autostart_command == "disable":
+            return disable_autostart()
+        return show_autostart_status()
     return show_status()
 
 
